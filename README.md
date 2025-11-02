@@ -133,20 +133,185 @@ The tool uses sensible defaults but can be customized:
 
 ## CI/CD Integration
 
+pytest-smart-runner is designed to work seamlessly in CI/CD environments where fresh clones don't have persistent state.
+
 ### GitHub Actions
 
+**Pull Request Testing:**
 ```yaml
-- name: Run affected tests
+name: Test
+
+on: pull_request
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history for accurate branch comparison
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -e .
+          pip install pytest-cov
+
+      - name: Run affected tests
+        run: |
+          pytest-smart --base-branch origin/${{ github.base_ref }} \
+                       --target-branch HEAD \
+                       -- --cov --junitxml=test-results.xml
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.xml
+```
+
+**Push to Main (Compare with Previous Commit):**
+```yaml
+- name: Run tests for new changes
   run: |
-    pytest-smart --base-branch origin/main -- --cov --junitxml=test-results.xml
+    pytest-smart --from-commit HEAD~1 -- -v
 ```
 
 ### GitLab CI
 
+**Merge Request Pipeline:**
+```yaml
+test:
+  stage: test
+  script:
+    - pip install -e .
+    - |
+      pytest-smart --base-branch origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME \
+                   --target-branch HEAD \
+                   -- --cov --junitxml=report.xml
+  artifacts:
+    reports:
+      junit: report.xml
+    paths:
+      - htmlcov/
+  only:
+    - merge_requests
+```
+
+**Commit-based Testing:**
 ```yaml
 test:
   script:
     - pytest-smart --from-commit $CI_MERGE_REQUEST_DIFF_BASE_SHA -- --cov
+```
+
+### CircleCI
+
+```yaml
+version: 2.1
+
+jobs:
+  test:
+    docker:
+      - image: cimg/python:3.11
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: pip install -e . pytest-cov
+      - run:
+          name: Run affected tests
+          command: |
+            pytest-smart --base-branch origin/main -- \
+              --cov --junitxml=test-results/junit.xml
+      - store_test_results:
+          path: test-results
+```
+
+### Jenkins
+
+```groovy
+pipeline {
+    agent any
+    stages {
+        stage('Test') {
+            steps {
+                sh '''
+                    pip install -e .
+                    pytest-smart --base-branch origin/${CHANGE_TARGET} \
+                                 -- --junitxml=results.xml
+                '''
+            }
+        }
+    }
+    post {
+        always {
+            junit 'results.xml'
+        }
+    }
+}
+```
+
+### Azure Pipelines
+
+```yaml
+trigger:
+  - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.11'
+
+- script: |
+    pip install -e .
+    pytest-smart --base-branch origin/main -- --junitxml=TEST-results.xml
+  displayName: 'Run affected tests'
+
+- task: PublishTestResults@2
+  inputs:
+    testResultsFiles: '**/TEST-*.xml'
+```
+
+### CI/CD Best Practices
+
+**1. Fetch Full Git History**
+```yaml
+# GitHub Actions
+- uses: actions/checkout@v4
+  with:
+    fetch-depth: 0  # Required for accurate branch comparison
+```
+
+**2. Handle First Commit (Empty Repository)**
+```bash
+# Gracefully handle repos with no commit history
+pytest-smart --base-branch origin/main || pytest tests/
+```
+
+**3. Combine with Full Test Runs**
+```yaml
+# Run affected tests on PR, full suite on main
+- name: Test
+  run: |
+    if [ "${{ github.event_name }}" == "pull_request" ]; then
+      pytest-smart --base-branch origin/main -- --cov
+    else
+      pytest tests/ --cov
+    fi
+```
+
+**4. Save Time with Dry Run First**
+```bash
+# Check if any tests would run before setting up heavy dependencies
+pytest-smart --dry-run || exit 0
 ```
 
 ## Development
@@ -188,6 +353,188 @@ ruff check src/ tests/
 - Import analysis uses static analysis (doesn't execute code)
 - May not detect indirect dependencies (e.g., A imports B, test tests A, you changed C that B imports)
 
+## Key Differentiators Explained
+
+Understanding how different pytest test selection tools work helps you choose the right one for your use case.
+
+### 1. Runtime Monitoring (pytest-testmon)
+
+**How it works:**
+```python
+# During test execution, pytest-testmon instruments the code
+# and tracks which lines are executed by each test
+
+# File: calculator.py
+def add(a, b):           # Line tracked during test_add()
+    return a + b         # Line tracked during test_add()
+
+def multiply(a, b):      # Line tracked during test_multiply()
+    return a * b         # Line tracked during test_multiply()
+
+# Change line 2 → test_add() re-runs
+# Change line 5 → test_multiply() re-runs
+```
+
+**Advantages:**
+- **Highest accuracy**: Knows exactly which code each test executes
+- **Handles indirect dependencies**: If A→B→C, changing C triggers tests for A
+- **Dynamic behavior**: Catches runtime imports, conditional logic, monkey patching
+
+**Disadvantages:**
+- **Requires full run first**: Need to execute all tests to build dependency map
+- **State management**: Maintains `.testmondata` database that can become stale
+- **CI/CD friction**: Database doesn't transfer between environments
+- **Runtime overhead**: Slight performance cost during instrumentation
+
+**Best for:**
+- Local development with long-running test suites
+- Projects with complex, dynamic dependencies
+- When you need maximum accuracy
+
+### 2. Static Analysis + Git (pytest-smart-runner)
+
+**How it works:**
+```python
+# Step 1: Git detects changed files
+$ git diff --name-only HEAD
+calculator.py
+
+# Step 2: Parse AST to find imports
+# File: test_calculator.py
+import pytest
+from myapp import calculator    # ← Found import!
+from myapp.utils import helper  # ← Found import!
+
+# Step 3: Match changed files to imports
+# calculator.py changed → test_calculator.py runs (import match)
+
+# Step 4: Apply naming conventions
+# calculator.py changed → test_calculator.py runs (naming match)
+```
+
+**Advantages:**
+- **Zero setup**: No initial run required, works immediately
+- **Stateless**: No database to maintain or get out of sync
+- **Git-native**: Built-in branch/commit comparison
+- **CI/CD friendly**: Works perfectly with fresh clones
+- **No runtime cost**: Pure static analysis, no instrumentation
+
+**Disadvantages:**
+- **Medium accuracy**: Can miss indirect dependencies (A imports B, B imports C)
+- **Static only**: Doesn't catch dynamic imports or runtime behavior
+- **Naming dependent**: Works best with conventional test naming
+
+**Best for:**
+- CI/CD pipelines with fresh environments
+- Branch-based workflows (PR testing)
+- Teams wanting low maintenance overhead
+- Projects with clear import structures
+
+### 3. Simple File-Based (pytest-picked)
+
+**How it works:**
+```bash
+# Step 1: Find changed files with git
+$ git diff --name-only HEAD
+calculator.py
+test_utils.py
+
+# Step 2: Filter to test files only
+test_utils.py
+
+# Step 3: Run only those tests
+pytest test_utils.py
+```
+
+**Advantages:**
+- **Simplest possible approach**: Minimal logic, easy to understand
+- **Fast**: No analysis overhead
+- **Transparent**: Obvious what will run
+
+**Disadvantages:**
+- **Lowest accuracy**: Only runs tests if test file itself changed
+- **Misses affected tests**: Source changes don't trigger related tests
+- **Limited usefulness**: Catches only direct test file edits
+
+**Best for:**
+- Quick sanity checks during development
+- When you mostly edit test files
+- Projects where source/test files are tightly coupled (1:1)
+
+### Practical Comparison Example
+
+```python
+# Project structure:
+# src/
+#   calculator.py      → defines Calculator class
+#   formatter.py       → imports calculator, uses it
+# tests/
+#   test_calculator.py → imports calculator directly
+#   test_formatter.py  → imports formatter
+
+# Scenario: You change calculator.py
+```
+
+**What each tool does:**
+
+| Tool | Tests Run | Why |
+|------|-----------|-----|
+| **pytest-testmon** | `test_calculator.py`, `test_formatter.py` | Runtime tracking shows both tests execute calculator.py code |
+| **pytest-smart-runner** | `test_calculator.py` | Import analysis finds direct import, misses formatter→calculator chain |
+| **pytest-picked** | _(none)_ | calculator.py isn't a test file |
+
+**Scenario: You change test_calculator.py**
+
+| Tool | Tests Run | Why |
+|------|-----------|-----|
+| **pytest-testmon** | `test_calculator.py` | Test file changed |
+| **pytest-smart-runner** | `test_calculator.py` | Test file changed |
+| **pytest-picked** | `test_calculator.py` | Test file changed |
+
+### When Accuracy Differences Matter
+
+**Critical projects** (payment, security, healthcare):
+- Use `pytest-testmon` for maximum safety
+- Consider running full suite on main branch
+
+**Fast-moving projects** (startups, prototypes):
+- Use `pytest-smart-runner` for speed
+- Accept occasional missed dependencies
+
+**Hybrid approach**:
+```yaml
+# .github/workflows/test.yml
+- name: Fast feedback
+  run: pytest-smart --base-branch origin/main
+
+- name: Full suite (weekly)
+  if: github.event.schedule
+  run: pytest tests/
+```
+
+### Performance Comparison
+
+```bash
+# Full test suite: 1000 tests, 5 minutes
+
+# Scenario: Changed 2 source files affecting 50 tests
+
+pytest-testmon:
+  First run:  5 min (full suite + instrumentation)
+  Next run:   30 sec (50 affected tests)
+  Setup:      ~10% overhead for tracking
+
+pytest-smart-runner:
+  First run:  30 sec (50 affected tests)
+  Next run:   30 sec (50 affected tests)
+  Setup:      0 sec (instant)
+
+pytest-picked:
+  First run:  0 sec (no test files changed)
+  Next run:   0 sec (no test files changed)
+  Setup:      0 sec (instant)
+```
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
@@ -197,6 +544,8 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 MIT License - see LICENSE file for details.
 
 ## Comparison with Other Tools
+
+> **💡 Tip**: See the [Key Differentiators Explained](#key-differentiators-explained) section above for detailed technical explanations and practical examples.
 
 ### pytest-testmon
 
@@ -226,19 +575,50 @@ pytest --testmon
 | **Git integration** | Optional | Built-in |
 | **Branch comparison** | No | Yes |
 | **Commit comparison** | No | Yes |
+| **CI/CD in fresh env** | Poor (needs database) | Excellent (stateless) |
+| **PR testing** | Requires workarounds | Native support |
+| **Database sync** | Can become stale | N/A (no database) |
 
 **When to use pytest-testmon:**
 - Maximum accuracy is critical
 - You have complex indirect dependencies
 - You're okay with maintaining a dependency database
 - You run tests frequently in the same environment
+- **Local development** where state persists between runs
 
 **When to use pytest-smart-runner:**
 - You want zero setup/overhead
 - You need git-aware comparisons (branches, commits)
 - You prefer static analysis over runtime monitoring
 - You want a lightweight solution without external databases
-- You're working in CI/CD with fresh environments
+- **CI/CD environments** with fresh clones on every run
+- **Pull request testing** comparing feature branches to main
+
+**CI/CD Integration Notes:**
+
+pytest-testmon in CI/CD:
+```yaml
+# Requires caching the database between runs
+- uses: actions/cache@v3
+  with:
+    path: .testmondata
+    key: testmon-${{ github.sha }}
+    restore-keys: testmon-
+
+# First run on new branch = full suite (no cache)
+# Subsequent runs = incremental (with cache)
+# Database can become stale across branches
+```
+
+pytest-smart-runner in CI/CD:
+```yaml
+# No caching needed - compares git directly
+- run: pytest-smart --base-branch origin/main
+
+# Works immediately on fresh clones
+# Always accurate for branch comparisons
+# No state management required
+```
 
 ### pytest-picked
 
