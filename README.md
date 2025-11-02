@@ -198,7 +198,78 @@ MIT License - see LICENSE file for details.
 
 ## Comparison with Other Tools
 
-- **pytest-testmon**: Monitors test execution and dependencies at runtime
-- **pytest-smart-runner**: Uses static analysis and git changes (lighter weight, no runtime overhead)
+### pytest-testmon
 
-Both approaches have merits - choose based on your needs!
+[pytest-testmon](https://github.com/tarpas/pytest-testmon) is the most popular and mature solution for running only affected tests.
+
+**Installation:**
+```bash
+pip install pytest-testmon
+pytest --testmon
+```
+
+**How it works:**
+- Monitors test execution at runtime to track which code each test executes
+- Stores dependency data in `.testmondata` database
+- On subsequent runs, only executes tests affected by code changes
+
+**Comparison:**
+
+| Feature | pytest-testmon | pytest-smart-runner |
+|---------|---------------|---------------------|
+| **Method** | Runtime monitoring | Static analysis + git |
+| **Accuracy** | Very high (tracks actual execution) | Medium (import-based) |
+| **Indirect dependencies** | Yes (A→B→C chain) | Partial (one level) |
+| **Setup overhead** | Full test run required first | None |
+| **Runtime overhead** | Minimal after setup | None |
+| **Database** | .testmondata file | None |
+| **Git integration** | Optional | Built-in |
+| **Branch comparison** | No | Yes |
+| **Commit comparison** | No | Yes |
+
+**When to use pytest-testmon:**
+- Maximum accuracy is critical
+- You have complex indirect dependencies
+- You're okay with maintaining a dependency database
+- You run tests frequently in the same environment
+
+**When to use pytest-smart-runner:**
+- You want zero setup/overhead
+- You need git-aware comparisons (branches, commits)
+- You prefer static analysis over runtime monitoring
+- You want a lightweight solution without external databases
+- You're working in CI/CD with fresh environments
+
+### pytest-picked
+
+[pytest-picked](https://github.com/anapaulagomes/pytest-picked) is a simpler git-based solution.
+
+**Installation:**
+```bash
+pip install pytest-picked
+pytest --picked
+```
+
+**How it works:**
+- Uses git to find changed files
+- Runs tests only from those changed files
+- No import analysis or mapping
+
+**Comparison to pytest-smart-runner:**
+- pytest-picked: Runs tests only if the test file itself changed
+- pytest-smart-runner: Also finds tests affected by source code changes through naming conventions and import analysis
+
+### Other Alternatives
+
+- **pytest-incremental**: Similar to testmon but less maintained
+- **pytest-watcher**: Watches files and re-runs tests (not change-aware)
+
+## Choosing the Right Tool
+
+1. **Need maximum accuracy?** → Use **pytest-testmon**
+2. **Want simplicity and only care about changed test files?** → Use **pytest-picked**
+3. **Need git integration, branch/commit comparison, and smart mapping without databases?** → Use **pytest-smart-runner**
+4. **Have complex projects with deep dependency chains?** → Use **pytest-testmon**
+5. **Working in CI/CD with fresh clones?** → Use **pytest-smart-runner**
+
+All three tools can complement each other - you could use pytest-smart-runner in CI and pytest-testmon locally!
