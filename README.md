@@ -653,3 +653,533 @@ pytest --picked
 5. **Working in CI/CD with fresh clones?** → Use **pytest-smart-runner**
 
 All three tools can complement each other - you could use pytest-smart-runner in CI and pytest-testmon locally!
+
+## Comprehensive Guide to Test Selection Tools and Approaches
+
+This section provides detailed information about various test selection strategies, tools, and implementation patterns.
+
+### 1. pytest-testmon (Most Popular for Python)
+
+Tracks code coverage and runs only tests affected by changes.
+
+```bash
+pip install pytest-testmon
+
+# First run - collects coverage data
+pytest --testmon
+
+# Subsequent runs - only runs affected tests
+pytest --testmon
+
+# Run all tests and update database
+pytest --testmon-forceselect
+```
+
+**How it works:**
+```python
+# Automatically detects which tests to run based on:
+# - Modified source files
+# - Test dependencies
+# - Coverage data from previous runs
+
+# .testmondata database stores:
+# - Test execution paths
+# - File dependencies
+# - Coverage information
+```
+
+### 2. pytest-incremental
+
+Focuses on running tests incrementally based on git changes.
+
+```bash
+pip install pytest-incremental
+
+# Run only tests affected by changes since last commit
+pytest --inc
+
+# Run tests affected since specific commit
+pytest --inc --inc-base=HEAD~3
+```
+
+### 3. Coverage.py with Dynamic Analysis
+
+```python
+# coverage_selector.py
+import coverage
+import ast
+import os
+
+class TestSelector:
+    def __init__(self):
+        self.cov = coverage.Coverage()
+
+    def find_affected_tests(self, changed_files):
+        """Find tests that cover the changed files"""
+        affected_tests = set()
+
+        # Load coverage data
+        self.cov.load()
+        data = self.cov.get_data()
+
+        for test_file in data.measured_files():
+            if test_file.endswith('_test.py'):
+                # Check if this test covers any changed files
+                executed_files = data.executed_files(test_file)
+                if any(cf in executed_files for cf in changed_files):
+                    affected_tests.add(test_file)
+
+        return affected_tests
+
+# Usage
+selector = TestSelector()
+changed = ['src/module.py', 'src/utils.py']
+tests_to_run = selector.find_affected_tests(changed)
+```
+
+### 4. pytest-picked (Git-based Selection)
+
+Runs tests related to unstaged files in git.
+
+```bash
+pip install pytest-picked
+
+# Run tests related to unstaged changes
+pytest --picked
+
+# Run tests for modified files
+pytest --picked=first
+
+# Include untracked files
+pytest --picked --mode=branch
+```
+
+### 5. Mutation Testing with mutmut
+
+Identifies which tests actually test which code.
+
+```bash
+pip install mutmut
+
+# Run mutation testing to build test-to-code mapping
+mutmut run
+
+# Use results to determine test effectiveness
+mutmut results
+
+# Integration with test selection
+mutmut run --paths-to-mutate src/module.py
+```
+
+### 6. Custom AST-based Dependency Analysis
+
+```python
+# test_mapper.py
+import ast
+import os
+from pathlib import Path
+
+class TestDependencyMapper:
+    def __init__(self):
+        self.import_graph = {}
+        self.test_to_modules = {}
+
+    def analyze_imports(self, filepath):
+        """Extract imports from a Python file"""
+        with open(filepath, 'r') as f:
+            tree = ast.parse(f.read())
+
+        imports = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.extend(n.name for n in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ''
+                imports.append(module)
+
+        return imports
+
+    def build_dependency_graph(self, project_root):
+        """Build complete dependency graph"""
+        for pyfile in Path(project_root).rglob("*.py"):
+            imports = self.analyze_imports(pyfile)
+            self.import_graph[str(pyfile)] = imports
+
+            if 'test' in str(pyfile):
+                self.test_to_modules[str(pyfile)] = imports
+
+    def find_affected_tests(self, changed_module):
+        """Find all tests that import the changed module"""
+        affected = []
+        module_name = Path(changed_module).stem
+
+        for test_file, imports in self.test_to_modules.items():
+            if module_name in imports:
+                affected.append(test_file)
+
+        return affected
+
+# Usage
+mapper = TestDependencyMapper()
+mapper.build_dependency_graph("/path/to/project")
+tests = mapper.find_affected_tests("src/core/engine.py")
+```
+
+### 7. pytest-watch with Patterns
+
+Watches files and runs related tests automatically.
+
+```bash
+pip install pytest-watch
+
+# Watch and run tests
+ptw
+
+# Custom patterns
+ptw -- --ignore=integration_tests/
+
+# With specific test selection
+ptw -- tests/unit/
+```
+
+**Configuration:**
+```ini
+# setup.cfg
+[tool:pytest-watch]
+ignore = ./integration_tests
+patterns = *.py
+runner = pytest --tb=short
+```
+
+### 8. Bazel Test Selection (for Python)
+
+```python
+# BUILD file
+py_test(
+    name = "engine_test",
+    srcs = ["engine_test.py"],
+    deps = [
+        "//src/core:engine",
+        "//src/utils:helpers",
+    ],
+)
+
+py_library(
+    name = "engine",
+    srcs = ["engine.py"],
+    deps = ["//src/utils:helpers"],
+)
+```
+
+```bash
+# Bazel automatically determines affected tests
+bazel test //... --test_selection_mode=affected
+
+# Query affected tests
+bazel query "rdeps(//..., //src/core:engine)"
+```
+
+### 9. Machine Learning-based Selection
+
+```python
+# ml_test_selector.py
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+import git
+
+class MLTestSelector:
+    def __init__(self):
+        self.model = RandomForestClassifier()
+        self.repo = git.Repo('.')
+
+    def extract_features(self, commit):
+        """Extract features from a commit"""
+        stats = commit.stats.files
+        features = {
+            'files_changed': len(stats),
+            'lines_added': sum(f.get('insertions', 0) for f in stats.values()),
+            'lines_deleted': sum(f.get('deletions', 0) for f in stats.values()),
+            'is_refactor': 'refactor' in commit.message.lower(),
+            'is_fix': 'fix' in commit.message.lower(),
+            'author': commit.author.name,
+        }
+        return features
+
+    def train_on_history(self):
+        """Train model on historical test failures"""
+        history = []
+
+        for commit in self.repo.iter_commits('main', max_count=1000):
+            features = self.extract_features(commit)
+            # Get test results (from CI system or logs)
+            failed_tests = self.get_test_results(commit.hexsha)
+            history.append({**features, 'failed_tests': failed_tests})
+
+        df = pd.DataFrame(history)
+        X = df.drop('failed_tests', axis=1)
+        y = df['failed_tests']
+
+        self.model.fit(X, y)
+
+    def predict_tests_to_run(self, current_changes):
+        """Predict which tests are likely to fail"""
+        features = self.extract_features_from_diff(current_changes)
+        predictions = self.model.predict_proba([features])
+
+        # Return tests with >50% probability of failure
+        likely_failures = [test for test, prob in predictions if prob > 0.5]
+        return likely_failures
+```
+
+### 10. GitHub/GitLab Integration Systems
+
+**pytest-split (for CI parallelization):**
+
+```yaml
+# .github/workflows/test.yml
+- name: Run tests
+  run: |
+    # Splits tests based on duration
+    pytest --splits 4 --group ${{ matrix.group }}
+```
+
+**pytest-benchmark with Historical Data:**
+
+```python
+# benchmark_selector.py
+import json
+from pathlib import Path
+
+class BenchmarkBasedSelector:
+    def __init__(self, benchmark_file='.benchmarks'):
+        self.benchmark_file = benchmark_file
+
+    def load_benchmarks(self):
+        """Load historical test durations"""
+        with open(self.benchmark_file) as f:
+            return json.load(f)
+
+    def select_quick_tests(self, max_duration=1.0):
+        """Select tests that run under max_duration seconds"""
+        benchmarks = self.load_benchmarks()
+        quick_tests = []
+
+        for test, stats in benchmarks.items():
+            if stats['mean'] < max_duration:
+                quick_tests.append(test)
+
+        return quick_tests
+
+    def select_critical_path(self, time_budget=60):
+        """Select most important tests within time budget"""
+        benchmarks = self.load_benchmarks()
+
+        # Sort by importance score (duration * failure_rate)
+        scored = []
+        for test, stats in benchmarks.items():
+            score = stats['mean'] * stats.get('failure_rate', 0.1)
+            scored.append((test, stats['mean'], score))
+
+        scored.sort(key=lambda x: x[2], reverse=True)
+
+        # Select tests within budget
+        selected = []
+        total_time = 0
+
+        for test, duration, score in scored:
+            if total_time + duration <= time_budget:
+                selected.append(test)
+                total_time += duration
+
+        return selected
+```
+
+### 11. Dynamic Test Generation
+
+```python
+# dynamic_test_selector.py
+import hypothesis
+from hypothesis import strategies as st
+import pytest
+
+class DynamicTestSelector:
+    def __init__(self, changed_function):
+        self.func = changed_function
+
+    def generate_property_tests(self):
+        """Generate property-based tests for changed function"""
+
+        # Analyze function signature
+        import inspect
+        sig = inspect.signature(self.func)
+
+        # Generate appropriate strategies
+        strategies = {}
+        for param in sig.parameters.values():
+            if param.annotation == int:
+                strategies[param.name] = st.integers()
+            elif param.annotation == str:
+                strategies[param.name] = st.text()
+            # Add more type mappings
+
+        @hypothesis.given(**strategies)
+        def test_property(self, **kwargs):
+            result = self.func(**kwargs)
+            # Add assertions based on function contracts
+            assert result is not None
+
+        return test_property
+
+# Usage with pytest
+def pytest_generate_tests(metafunc):
+    if "dynamic_test" in metafunc.fixturenames:
+        # Generate tests for changed functions
+        changed_funcs = get_changed_functions()
+        metafunc.parametrize("dynamic_test",
+                           [DynamicTestSelector(f) for f in changed_funcs])
+```
+
+### 12. Import Graph Analysis
+
+```python
+# import_graph_selector.py
+import importlib
+import sys
+from typing import Set, Dict, List
+
+class ImportGraphAnalyzer:
+    def __init__(self):
+        self.graph: Dict[str, Set[str]] = {}
+        self.reverse_graph: Dict[str, Set[str]] = {}
+
+    def build_import_graph(self, root_module):
+        """Build complete import dependency graph"""
+        visited = set()
+        self._traverse_imports(root_module, visited)
+
+    def _traverse_imports(self, module_name: str, visited: Set[str]):
+        if module_name in visited:
+            return
+        visited.add(module_name)
+
+        try:
+            module = importlib.import_module(module_name)
+
+            # Get all imports
+            for name, obj in module.__dict__.items():
+                if hasattr(obj, '__module__'):
+                    imported_from = obj.__module__
+                    if imported_from and imported_from.startswith('your_package'):
+                        self.graph.setdefault(module_name, set()).add(imported_from)
+                        self.reverse_graph.setdefault(imported_from, set()).add(module_name)
+                        self._traverse_imports(imported_from, visited)
+        except ImportError:
+            pass
+
+    def find_affected_modules(self, changed_module: str) -> Set[str]:
+        """Find all modules affected by a change"""
+        affected = {changed_module}
+        to_visit = [changed_module]
+
+        while to_visit:
+            current = to_visit.pop()
+            dependents = self.reverse_graph.get(current, set())
+            for dep in dependents:
+                if dep not in affected:
+                    affected.add(dep)
+                    to_visit.append(dep)
+
+        return affected
+
+    def find_test_modules(self, affected_modules: Set[str]) -> List[str]:
+        """Filter test modules from affected modules"""
+        return [m for m in affected_modules if 'test' in m]
+
+# Usage
+analyzer = ImportGraphAnalyzer()
+analyzer.build_import_graph('your_package')
+affected = analyzer.find_affected_modules('your_package.core.engine')
+tests = analyzer.find_test_modules(affected)
+```
+
+## Best Practices & Recommendations
+
+### For Small Projects
+
+Use **pytest-testmon** or **pytest-picked**:
+- Simple and effective out of the box
+- Minimal configuration required
+
+### For Large Monorepos
+
+Use **Bazel** or **Buck2** for dependency tracking:
+- Custom AST analysis for fine-grained control
+- Scalable to thousands of tests
+
+### For CI/CD
+
+Example GitHub Actions workflow:
+
+```yaml
+# Example GitHub Actions workflow
+name: Smart Test Selection
+on: [push]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0  # Full history for comparison
+
+      - name: Identify changed files
+        run: |
+          echo "CHANGED_FILES=$(git diff --name-only HEAD~1)" >> $GITHUB_ENV
+
+      - name: Run affected tests
+        run: |
+          pytest --testmon --cov=src
+
+      - name: Run full suite on main
+        if: github.ref == 'refs/heads/main'
+        run: |
+          pytest --testmon-forceselect
+```
+
+### For Maximum Efficiency
+
+**Layer your approach:**
+
+1. Quick smoke tests first
+2. Affected unit tests second
+3. Integration tests if needed
+4. Full suite on main branch
+
+**Cache aggressively:**
+
+```ini
+# pytest.ini
+[tool:pytest]
+cache_dir = .pytest_cache
+testmon_data_file = .testmondata
+```
+
+**Combine multiple strategies:**
+
+```bash
+# Run affected tests first, then risky areas
+pytest --testmon --picked || pytest tests/integration/
+```
+
+## Summary
+
+The best system depends on your project structure, team size, and CI/CD setup. Start simple with **pytest-testmon** and add complexity as needed.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+MIT License - see LICENSE file for details.
